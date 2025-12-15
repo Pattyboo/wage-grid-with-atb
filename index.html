@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Wage Calculator</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 20px; max-width: 850px; margin: 0 auto; }
+    h1 { margin: 0 0 10px; }
+    .box { border: 1px solid #ddd; border-radius: 10px; padding: 14px; margin: 12px 0; }
+    label { display:block; margin: 8px 0 4px; }
+    input, select { padding: 10px; width: 100%; max-width: 320px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 10px; }
+    th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+    th { background: #f5f5f5; }
+    .small { color:#666; font-size: 14px; }
+    .row { display:flex; gap:18px; flex-wrap:wrap; align-items:flex-end; }
+    .row > div { flex: 1 1 260px; }
+    .pill { display:inline-block; padding: 6px 10px; border-radius: 999px; background:#eef6ff; }
+  </style>
+</head>
+<body>
+  <h1>Wage Calculator</h1>
+  <p class="small">Type your pay and years. This gives an estimate.</p>
+
+  <div class="box">
+    <div class="row">
+      <div>
+        <label>Base hourly rate (Inexp)</label>
+        <input id="basePay" type="number" step="0.001" placeholder="Example: 54.737" />
+      </div>
+      <div>
+        <label>Years of service (in 2025)</label>
+        <input id="years" type="number" step="1" min="0" placeholder="Example: 10" />
+      </div>
+      <div>
+        <label>Proposal</label>
+        <select id="proposal">
+          <option value="union">Union ATB schedule</option>
+          <option value="employer">Employer ATB schedule</option>
+        </select>
+      </div>
+    </div>
+
+    <p class="small">Step rule you gave:</p>
+    <p class="small">
+      0=Inexp, 1→1, 2→2, 3→3, 4→4, 5→5, 6→6, 7→6, 8→8, 9→8, 10–14→10, 15–19→15, 20–24→20, 25→25
+    </p>
+  </div>
+
+  <div class="box">
+    <div>Current grid step: <span class="pill" id="stepLabel">—</span></div>
+    <div class="small">Step factor (multiplier): <span id="stepFactor">—</span></div>
+    <div class="small">Current step-adjusted rate: <b id="currentRate">—</b></div>
+  </div>
+
+  <div class="box">
+    <h2 style="margin:0 0 8px;">Projection</h2>
+    <div class="small">Shows ATB % and total % (ATB + step movement). Total % uses compounding.</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>ATB %</th>
+          <th>Grid step</th>
+          <th>Hourly rate</th>
+          <th>ATB-only % from start</th>
+          <th>ATB + step % from start</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+<script>
+  // Step factors (based on your Year 4 example: Inexp=1.000 and others relative)
+  // Inexp=1.000
+  // Start=1.060
+  // 1 yr=1.145 (approx)
+  // 2 yr=1.202
+  // 3 yr=1.262
+  // 4 yr=1.313
+  // 5 yr=1.365
+  // 6 yr=1.413
+  // 8 yr=1.459
+  // 10 yr=1.506
+  // 15 yr=1.546
+  // 20 yr=1.584
+  // 25 yr=1.624
+  const STEP_FACTOR = {
+    "Inexp": 1.000,
+    "1 yr": 1.145,   // from your table (Inexp→1yr total was ~14.49%)
+    "2 yr": 1.202,
+    "3 yr": 1.262,
+    "4 yr": 1.313,
+    "5 yr": 1.365,
+    "6 yr": 1.413,
+    "8 yr": 1.459,
+    "10 yr": 1.506,
+    "15 yr": 1.546,
+    "20 yr": 1.584,
+    "25 yr": 1.624
+  };
+
+  function yearsToStepLabel(y) {
+    if (y === 0) return "Inexp";
+    if (y >= 1 && y <= 6) return `${y} yr`;
+    if (y === 7) return "6 yr";
+    if (y === 8 || y === 9) return "8 yr";
+    if (y >= 10 && y <= 14) return "10 yr";
+    if (y >= 15 && y <= 19) return "15 yr";
+    if (y >= 20 && y <= 24) return "20 yr";
+    return "25 yr";
+  }
+
+  // ATB schedules
+  const UNION_ATB = [
+    { date: "10/1/2025", pct: 0.075 },
+    { date: "10/1/2026", pct: 0.065 },
+    { date: "4/1/2027",  pct: 0.03  },
+    { date: "10/1/2027", pct: 0.04  },
+    { date: "10/1/2028", pct: 0.04  }
+  ];
+
+  const EMPLOYER_ATB = [
+    { date: "10/1/2025", pct: 0.065 },
+    { date: "10/1/2026", pct: 0.065 },
+    { date: "8/1/2027",  pct: 0.03  },
+    { date: "10/1/2027", pct: 0.025 },
+    { date: "10/1/2028", pct: 0.03  }
+  ];
+
+  function money(x) {
+    if (!isFinite(x)) return "—";
+    return x.toLocaleString(undefined, { style:"currency", currency:"USD" });
+  }
+
+  function pctFmt(x) {
+    if (!isFinite(x)) return "—";
+    return (x*100).toFixed(2) + "%";
+  }
+
+  function recalc() {
+    const basePay = parseFloat(document.getElementById("basePay").value);
+    const years = parseInt(document.getElementById("years").value, 10);
+    const proposal = document.getElementById("proposal").value;
+
+    const tbody = document.getElementById("rows");
+    tbody.innerHTML = "";
+
+    if (!isFinite(basePay) || !isFinite(years)) {
+      document.getElementById("stepLabel").textContent = "—";
+      document.getElementById("stepFactor").textContent = "—";
+      document.getElementById("currentRate").textContent = "—";
+      return;
+    }
+
+    const stepLabel = yearsToStepLabel(years);
+    const stepFactor = STEP_FACTOR[stepLabel] ?? 1.0;
+
+    const startStepRate = basePay * stepFactor;
+
+    document.getElementById("stepLabel").textContent = stepLabel;
+    document.getElementById("stepFactor").textContent = stepFactor.toFixed(3);
+    document.getElementById("currentRate").textContent = money(startStepRate);
+
+    const schedule = proposal === "union" ? UNION_ATB : EMPLOYER_ATB;
+
+    // Track two paths:
+    // 1) ATB-only on the step rate at start (compounded)
+    // 2) ATB + step movement (this demo assumes step label stays same; if you want years to advance per year, we can add it)
+    let atbOnlyRate = startStepRate;
+    let atbPlusStepRate = startStepRate;
+
+    // For a simple first version, we keep the same step label.
+    // If you want step to advance each year based on time, tell me the exact rule and I’ll add it.
+
+    schedule.forEach((item) => {
+      atbOnlyRate = atbOnlyRate * (1 + item.pct);
+      atbPlusStepRate = atbPlusStepRate * (1 + item.pct);
+
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${item.date}</td>
+        <td>${pctFmt(item.pct)}</td>
+        <td>${stepLabel}</td>
+        <td>${money(atbPlusStepRate)}</td>
+        <td>${pctFmt(atbOnlyRate / startStepRate - 1)}</td>
+        <td>${pctFmt(atbPlusStepRate / startStepRate - 1)}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  ["basePay","years","proposal"].forEach(id => {
+    document.getElementById(id).addEventListener("input", recalc);
+    document.getElementById(id).addEventListener("change", recalc);
+  });
+</script>
+</body>
+</html>
